@@ -11,14 +11,19 @@ from pytorch_lightning.utilities import rank_zero_info
 
 from co_datasets.tsp_graph_dataset import TSPGraphDataset
 from pl_meta_model import COMetaModel
+from pl_tsp_model import TSPModel
 from utils.diffusion_schedulers import InferenceSchedule
 from utils.tsp_utils import TSPEvaluator, batched_two_opt_torch, merge_tours
 
+#initialize weights of model with weights from model_ema
 
-class TSPModel(COMetaModel):
+
+
+
+class TSPModel_distill(COMetaModel):
   def __init__(self,
                param_args=None):
-    super(TSPModel, self).__init__(param_args=param_args, node_feature_only=False)
+    super(TSPModel_distill, self).__init__(param_args=param_args, node_feature_only=False)
 
     self.train_dataset = TSPGraphDataset(
         data_file=os.path.join(self.args.storage_path, self.args.training_split),
@@ -34,6 +39,16 @@ class TSPModel(COMetaModel):
         data_file=os.path.join(self.args.storage_path, self.args.validation_split),
         sparse_factor=self.args.sparse_factor,
     )
+
+    #initialize student teacher pair
+    self.student_model = COMetaModel(param_args=param_args)
+    self.teacher_model = COMetaModel(param_args=param_args)
+
+    #initialize parameter at beginning, both same weights
+    self.student_model.load_from_checkpoint(param_args.ckpt_path)
+    self.teacher_model.load_from_checkpoint(param_args.ckpt_path)
+
+
 
   def forward(self, x, adj, t, edge_index):
     return self.model(x, t, adj, edge_index)
@@ -85,6 +100,25 @@ class TSPModel(COMetaModel):
     loss = loss_func(x0_pred, adj_matrix.long())
     self.log("train/loss", loss)
     return loss
+
+  def gaussian_distill(self,batch,batch_idx):
+    #get batch data
+    if self.sparse:
+      # TODO: Implement Gaussian diffusion with sparse graphs
+      raise ValueError("DIFUSCO with sparse graphs are not supported for Gaussian diffusion")
+    _, points, adj_matrix, _ = batch
+
+    adj_matrix = adj_matrix * 2 - 1
+    adj_matrix = adj_matrix * (1.0 + 0.05 * torch.rand_like(adj_matrix))
+    # Sample from diffusion
+    t = np.random.randint(1, self.diffusion.T + 1, adj_matrix.shape[0]).astype(int)
+    xt, epsilon = self.diffusion.sample(adj_matrix, t)
+
+    
+
+
+
+
 
   def gaussian_training_step(self, batch, batch_idx):
     if self.sparse:
