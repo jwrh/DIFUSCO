@@ -52,6 +52,7 @@ class TSPModel_distill(COMetaModel):
 
 
   def forward(self, x, adj, t, edge_index):
+    assert(0 == 1, "This should not be called")
     return self.model(x, t, adj, edge_index)
 
   def categorical_training_step(self, batch, batch_idx):
@@ -112,30 +113,45 @@ class TSPModel_distill(COMetaModel):
     adj_matrix = adj_matrix * 2 - 1
     adj_matrix = adj_matrix * (1.0 + 0.05 * torch.rand_like(adj_matrix))
     # Sample from diffusion
-    t = np.random.randint(1, self.diffusion.T + 1, adj_matrix.shape[0]).astype(int)
-    xt, epsilon = self.diffusion.sample(adj_matrix, t)
+    t = np.random.randint(1, self.student_model.diffusion.T + 1, adj_matrix.shape[0]).astype(int)
+    tprime =  np.array([t-1]).astype(int)
+    tprimeprime = np.array([t-2]).astype(int)
+    xt, epsilon = self.student_model.diffusion.sample(adj_matrix, t)
+    t = torch.from_numpy(t).float().view(adj_matrix.shape[0])
 
+    tprimetorch = torch.from_numpy(tprime).float().view(adj_matrix.shape[0])
+    tprimeprimetorch = torch.from_numpy(tprimeprime).float().view(adj_matrix.shape[0])
     #two steps of teacher DDIM
-    xprime = self.teacher_model.forward(
-      points.float().to(adj_matrix.device),xt.float().to(adj_matrix.device),t.float().to(adj_matrix.device)
+    with torch.no_grad():
+      xprime = self.teacher_gaussian_denoise_step(
+        points.float().to(adj_matrix.device),
+        
+      
+      xprimeprime = self.teacher_model.forward(
+        points.float().to(adj_matrix.device),
+        xprime.float().to(adj_matrix.device),
+        tprimeprimetorch.float().to(adj_matrix.device),
+        None
+      )
+      xprimeprime = self.teacher_model.gaussian_posterior(
+        tprimeprime, tprimetorch, xprimeprime, xprime
+      )  
+    
+    #one step of student DDIM
+    xtheta = self.student_model.forward(
+      points.float().to(adj_matrix.device),
+      xt.float().to(adj_matrix.device),
+      t.float().to(adj_matrix.device),
     )
-    xprime = self.teacher_model.gaussian_posterior(
-      xprime,epsilon.float().to(adj_matrix.device)
+    xtheta = self.student_model.gaussian_posterior(
+      tprime, t, xtheta, xt
     )
     
-    xprimeprime = self.teacher_model.forward(
-      points.float().to(adj_matrix.device),xprime.float().to(adj_matrix.device),t.float().to(adj_matrix.device)
-    )
-    xprimeprime = self.teacher_model.gaussian_posterior(
-      xprimeprime,epsilon.float().to(adj_matrix.device)
-    )  
+    #compute mse loss
+    loss = F.mse_loss(xprimeprime,xtheta)
+    self.log("train/loss", loss)
+    return loss
     
-    
-    
-
-
-
-
 
   def gaussian_training_step(self, batch, batch_idx):
     if self.sparse:
@@ -166,7 +182,7 @@ class TSPModel_distill(COMetaModel):
 
   def training_step(self, batch, batch_idx):
     if self.diffusion_type == 'gaussian':
-      return self.gaussian_training_step(batch, batch_idx)
+      return self.gaussian_distill(batch, batch_idx)
     elif self.diffusion_type == 'categorical':
       return self.categorical_training_step(batch, batch_idx)
 
@@ -199,6 +215,32 @@ class TSPModel_distill(COMetaModel):
       )
       pred = pred.squeeze(1)
       xt = self.gaussian_posterior(target_t, t, pred, xt)
+      return xt
+    
+  def teacher_gaussian_denoise_step(self, points, xt, t, device, edge_index=None, target_t=None):
+    with torch.no_grad():
+      t = torch.from_numpy(t).view(1)
+      pred = self.teacher_model.forward(
+          points.float().to(device),
+          xt.float().to(device),
+          t.float().to(device),
+          edge_index.long().to(device) if edge_index is not None else None,
+      )
+      pred = pred.squeeze(1)
+      xt = self.teacher_model.gaussian_posterior(target_t, t, pred, xt)
+      return xt
+  
+  def student_gaussian_denoise_step(self, points, xt, t, device, edge_index=None, target_t=None):
+      #we don't add torch.no_grad() here because we want to compute the gradients
+      t = torch.from_numpy(t).view(1)
+      pred = self.student_model.forward(
+          points.float().to(device),
+          xt.float().to(device),
+          t.float().to(device),
+          edge_index.long().to(device) if edge_index is not None else None,
+      )
+      pred = pred.squeeze(1)
+      xt = self.student_model.gaussian_posterior(target_t, t, pred, xt)
       return xt
 
   def test_step(self, batch, batch_idx, split='test'):

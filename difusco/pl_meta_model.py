@@ -46,6 +46,9 @@ class COMetaModel(pl.LightningModule):
     )
     self.num_training_steps_cached = None
 
+  def forward(self, x, adj, t, edge_index):
+    return self.model(x, t, adj, edge_index)
+  
   def test_epoch_end(self, outputs):
     unmerged_metrics = {}
     for metrics in outputs:
@@ -84,7 +87,7 @@ class COMetaModel(pl.LightningModule):
 
     if self.args.lr_scheduler == "constant":
       return torch.optim.AdamW(
-          self.model.parameters(), lr=self.args.learning_rate, weight_decay=self.args.weight_decay)
+          self.student_model.parameters(), lr=self.args.learning_rate, weight_decay=self.args.weight_decay)
 
     else:
       optimizer = torch.optim.AdamW(
