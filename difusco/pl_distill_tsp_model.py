@@ -42,9 +42,11 @@ class TSPModel_distill(COMetaModel):
     
     param_args = self.args
     #initialize student teacher pair
-    self.student_model = COMetaModel(param_args=param_args)
+    # self.student_model = COMetaModel(param_args=param_args)
     self.teacher_model = COMetaModel(param_args=param_args)
-
+    #define self as student model, 
+    
+    
     #initialize parameter at beginning, both same weights
     # self.student_model.load_from_checkpoint(param_args.ckpt_path)
     # self.teacher_model.load_from_checkpoint(param_args.ckpt_path)
@@ -105,6 +107,9 @@ class TSPModel_distill(COMetaModel):
 
   def gaussian_distill(self,batch,batch_idx):
     #get batch data
+    device = batch[-1].device
+    edge_index = None
+    
     if self.sparse:
       # TODO: Implement Gaussian diffusion with sparse graphs
       raise ValueError("DIFUSCO with sparse graphs are not supported for Gaussian diffusion")
@@ -112,39 +117,38 @@ class TSPModel_distill(COMetaModel):
 
     adj_matrix = adj_matrix * 2 - 1
     adj_matrix = adj_matrix * (1.0 + 0.05 * torch.rand_like(adj_matrix))
-    # Sample from diffusion
-    t = np.random.randint(1, self.student_model.diffusion.T + 1, adj_matrix.shape[0]).astype(int)
-    tprime =  np.array([t-1]).astype(int)
-    tprimeprime = np.array([t-2]).astype(int)
-    xt, epsilon = self.student_model.diffusion.sample(adj_matrix, t)
-    t = torch.from_numpy(t).float().view(adj_matrix.shape[0])
-
-    tprimetorch = torch.from_numpy(tprime).float().view(adj_matrix.shape[0])
-    tprimeprimetorch = torch.from_numpy(tprimeprime).float().view(adj_matrix.shape[0])
-    #two steps of teacher DDIM
-    with torch.no_grad():
-      xprime = self.teacher_gaussian_denoise_step(
-        points.float().to(adj_matrix.device),
-        
-      
-      xprimeprime = self.teacher_model.forward(
-        points.float().to(adj_matrix.device),
-        xprime.float().to(adj_matrix.device),
-        tprimeprimetorch.float().to(adj_matrix.device),
-        None
-      )
-      xprimeprime = self.teacher_model.gaussian_posterior(
-        tprimeprime, tprimetorch, xprimeprime, xprime
-      )  
     
+    # Sample from diffusion
+    t = np.random.randint(1, self.student_model.diffusion.T + 1,adj_matrix.shape[0])
+    steps = self.args.inference_diffusion_steps
+    time_schedule = InferenceSchedule(inference_schedule=self.args.inference_schedule,
+                                        T=self.diffusion.T, inference_T=steps)
+
+      # Diffusion iterations
+
+
+    tprime = t - 1
+    tprimeprime = t - 2
+    
+    xt, epsilon = self.student_model.diffusion.sample(adj_matrix, t)
+    
+    t = torch.from_numpy(t).view(adj_matrix.shape[0])
+
+
+    
+    #two steps of teacher DDIM
+    xprime = self.teacher_gaussian_denoise_step(
+        points, xt, t, device, edge_index, target_t=tprime
+      )
+      
+    xprimeprime = self.teacher_gaussian_denoise_step(
+        points, xprime, tprime, device, edge_index, target_t=tprimeprime
+      ) 
+      
+      
     #one step of student DDIM
-    xtheta = self.student_model.forward(
-      points.float().to(adj_matrix.device),
-      xt.float().to(adj_matrix.device),
-      t.float().to(adj_matrix.device),
-    )
-    xtheta = self.student_model.gaussian_posterior(
-      tprime, t, xtheta, xt
+    xtheta = self.student_gaussian_denoise_step(
+      points, xt, t, device, edge_index, target_t=tprime
     )
     
     #compute mse loss
@@ -165,7 +169,7 @@ class TSPModel_distill(COMetaModel):
     t = np.random.randint(1, self.diffusion.T + 1, adj_matrix.shape[0]).astype(int)
     xt, epsilon = self.diffusion.sample(adj_matrix, t)
 
-    t = torch.from_numpy(t).float().view(adj_matrix.shape[0])
+    t = torch.from_numpy(t).float().view(adj_matrix.shape[0]) # 32 x 1 
     # Denoise
     epsilon_pred = self.forward(
         points.float().to(adj_matrix.device),
@@ -219,7 +223,7 @@ class TSPModel_distill(COMetaModel):
     
   def teacher_gaussian_denoise_step(self, points, xt, t, device, edge_index=None, target_t=None):
     with torch.no_grad():
-      t = torch.from_numpy(t).view(1)
+      # t = torch.from_numpy(t).view(1)
       pred = self.teacher_model.forward(
           points.float().to(device),
           xt.float().to(device),
@@ -232,7 +236,7 @@ class TSPModel_distill(COMetaModel):
   
   def student_gaussian_denoise_step(self, points, xt, t, device, edge_index=None, target_t=None):
       #we don't add torch.no_grad() here because we want to compute the gradients
-      t = torch.from_numpy(t).view(1)
+      # t = torch.from_numpy(t).view(1)
       pred = self.student_model.forward(
           points.float().to(device),
           xt.float().to(device),
