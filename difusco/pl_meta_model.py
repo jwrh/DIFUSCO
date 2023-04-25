@@ -87,11 +87,11 @@ class COMetaModel(pl.LightningModule):
 
     if self.args.lr_scheduler == "constant":
       return torch.optim.AdamW(
-          self.student_model.parameters(), lr=self.args.learning_rate, weight_decay=self.args.weight_decay)
+          self.parameters(), lr=self.args.learning_rate, weight_decay=self.args.weight_decay)
 
     else:
       optimizer = torch.optim.AdamW(
-          self.model.parameters(), lr=self.args.learning_rate, weight_decay=self.args.weight_decay)
+          self.parameters(), lr=self.args.learning_rate, weight_decay=self.args.weight_decay)
       scheduler = get_schedule_fn(self.args.lr_scheduler, self.get_total_num_training_steps())(optimizer)
 
       return {
@@ -158,10 +158,12 @@ class COMetaModel(pl.LightningModule):
       target_t = torch.from_numpy(target_t).view(1)
 
     atbar = diffusion.alphabar[t]
+    print(diffusion.alphabar)
     atbar_target = diffusion.alphabar[target_t]
 
     if self.args.inference_trick is None or t <= 1:
       # Use DDPM posterior
+      print(t, self.args.inference_trick)
       at = diffusion.alpha[t]
       z = torch.randn_like(xt)
       atbar_prev = diffusion.alphabar[t - 1]

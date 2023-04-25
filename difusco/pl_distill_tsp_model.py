@@ -10,7 +10,7 @@ import torch.utils.data
 from pytorch_lightning.utilities import rank_zero_info
 
 from co_datasets.tsp_graph_dataset import TSPGraphDataset
-from pl_meta_model import COMetaModel
+from pl_meta_distill import COMetaModel
 from pl_tsp_model import TSPModel
 from utils.diffusion_schedulers import InferenceSchedule
 from utils.tsp_utils import TSPEvaluator, batched_two_opt_torch, merge_tours
@@ -44,8 +44,8 @@ class TSPModel_distill(COMetaModel):
     #initialize student teacher pair
     # self.student_model = COMetaModel(param_args=param_args)
     self.teacher_model = COMetaModel(param_args=param_args)
-    #define self as student model, 
-    
+
+
     
     #initialize parameter at beginning, both same weights
     # self.student_model.load_from_checkpoint(param_args.ckpt_path)
@@ -120,39 +120,41 @@ class TSPModel_distill(COMetaModel):
     
     # Sample from diffusion
     t = np.random.randint(1, self.student_model.diffusion.T + 1,adj_matrix.shape[0])
-    steps = self.args.inference_diffusion_steps
-    time_schedule = InferenceSchedule(inference_schedule=self.args.inference_schedule,
-                                        T=self.diffusion.T, inference_T=steps)
-
-      # Diffusion iterations
-
-
     tprime = t - 1
     tprimeprime = t - 2
+    
     
     xt, epsilon = self.student_model.diffusion.sample(adj_matrix, t)
     
     t = torch.from_numpy(t).view(adj_matrix.shape[0])
 
-
+    # print(xt.shape)
+    loss = 0 
     
     #two steps of teacher DDIM
-    xprime = self.teacher_gaussian_denoise_step(
-        points, xt, t, device, edge_index, target_t=tprime
+    for idx in range(t.shape[0]):
+      tprime_elem = np.array([tprime[idx]]).astype(int)
+      tprimeprime_elem = np.array([tprimeprime[idx]]).astype(int)
+      t_elem = np.array([t[idx]]).astype(int)
+      # print(t_elem,tprime_elem,tprimeprime_elem)
+      xprime = self.teacher_gaussian_denoise_step(
+        points, xt, t_elem ,device, edge_index, target_t=tprime_elem
       )
       
-    xprimeprime = self.teacher_gaussian_denoise_step(
-        points, xprime, tprime, device, edge_index, target_t=tprimeprime
+      xprimeprime = self.teacher_gaussian_denoise_step(
+        points, xprime,tprime_elem, device, edge_index, target_t=tprimeprime_elem
       ) 
       
       
-    #one step of student DDIM
-    xtheta = self.student_gaussian_denoise_step(
-      points, xt, t, device, edge_index, target_t=tprime
+      #one step of student DDIM
+      xtheta = self.student_gaussian_denoise_step(
+      points, xt, t_elem, device, edge_index, target_t=tprime_elem
     )
     
-    #compute mse loss
-    loss = F.mse_loss(xprimeprime,xtheta)
+      # print(xprimeprime.shape,xtheta.shape)
+      #compute mse loss
+      loss += F.mse_loss(xprimeprime,xtheta)
+      
     self.log("train/loss", loss)
     return loss
     
@@ -211,19 +213,20 @@ class TSPModel_distill(COMetaModel):
   def gaussian_denoise_step(self, points, xt, t, device, edge_index=None, target_t=None):
     with torch.no_grad():
       t = torch.from_numpy(t).view(1)
-      pred = self.forward(
+      pred = self.student_model.forward(
           points.float().to(device),
           xt.float().to(device),
           t.float().to(device),
           edge_index.long().to(device) if edge_index is not None else None,
       )
       pred = pred.squeeze(1)
-      xt = self.gaussian_posterior(target_t, t, pred, xt)
+      xt = self.student_model.gaussian_posterior(target_t, t, pred, xt)
       return xt
     
   def teacher_gaussian_denoise_step(self, points, xt, t, device, edge_index=None, target_t=None):
     with torch.no_grad():
-      # t = torch.from_numpy(t).view(1)
+      t = torch.from_numpy(t).view(1)
+      # print("teacher time",t)
       pred = self.teacher_model.forward(
           points.float().to(device),
           xt.float().to(device),
@@ -231,12 +234,15 @@ class TSPModel_distill(COMetaModel):
           edge_index.long().to(device) if edge_index is not None else None,
       )
       pred = pred.squeeze(1)
+
       xt = self.teacher_model.gaussian_posterior(target_t, t, pred, xt)
+
       return xt
   
   def student_gaussian_denoise_step(self, points, xt, t, device, edge_index=None, target_t=None):
       #we don't add torch.no_grad() here because we want to compute the gradients
-      # t = torch.from_numpy(t).view(1)
+      t = torch.from_numpy(t).view(1)
+      # print("student time",t)
       pred = self.student_model.forward(
           points.float().to(device),
           xt.float().to(device),
@@ -296,7 +302,7 @@ class TSPModel_distill(COMetaModel):
       if self.sparse:
         xt = xt.reshape(-1)
 
-      steps = self.args.inference_diffusion_steps
+      steps = self.args.inference_diffusion_steps // 2
       time_schedule = InferenceSchedule(inference_schedule=self.args.inference_schedule,
                                         T=self.diffusion.T, inference_T=steps)
 

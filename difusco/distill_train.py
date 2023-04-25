@@ -38,8 +38,8 @@ def arg_parser():
 
   parser.add_argument('--diffusion_type', type=str, default='gaussian')
   parser.add_argument('--diffusion_schedule', type=str, default='linear')
-  parser.add_argument('--diffusion_steps', type=int, default=1000)
-  parser.add_argument('--inference_diffusion_steps', type=int, default=1000)
+  parser.add_argument('--diffusion_steps', type=int, default=1024)
+  parser.add_argument('--inference_diffusion_steps', type=int, default=1024)
   parser.add_argument('--inference_schedule', type=str, default='linear')
   parser.add_argument('--inference_trick', type=str, default="ddim")
   parser.add_argument('--sequential_sampling', type=int, default=1)
@@ -129,9 +129,9 @@ def main(args):
       trainer.test(ckpt_path=checkpoint_callback.best_model_path)
 
   elif args.do_test:
-    trainer.validate(model, ckpt_path=ckpt_path)
+    trainer.validate(model.student_model, ckpt_path=ckpt_path)
     if not args.do_valid_only:
-      trainer.test(model, ckpt_path=ckpt_path)
+      trainer.test(model.student_model, ckpt_path=ckpt_path)
       
   trainer.logger.finalize("success")
 
