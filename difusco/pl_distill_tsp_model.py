@@ -14,6 +14,7 @@ from pl_meta_distill import COMetaModel
 from pl_tsp_model import TSPModel
 from utils.diffusion_schedulers import InferenceSchedule
 from utils.tsp_utils import TSPEvaluator, batched_two_opt_torch, merge_tours
+from torch import vmap
 
 #initialize weights of model with weights from model_ema
 
@@ -48,7 +49,6 @@ class TSPModel_distill(COMetaModel):
 
 
   def forward(self, x, adj, t, edge_index):
-    assert(0 == 1, "This should not be called")
     return self.model(x, t, adj, edge_index)
 
   def categorical_training_step(self, batch, batch_idx):
@@ -74,7 +74,7 @@ class TSPModel_distill(COMetaModel):
     xt = self.diffusion.sample(adj_matrix_onehot, t)
     xt = xt * 2 - 1
     xt = xt * (1.0 + 0.05 * torch.rand_like(xt))
-
+    
     if self.sparse:
       t = torch.from_numpy(t).float()
       t = t.reshape(-1, 1).repeat(1, adj_matrix.shape[1]).reshape(-1)
@@ -121,35 +121,46 @@ class TSPModel_distill(COMetaModel):
     xt, epsilon = self.diffusion.sample(adj_matrix, t)
     
     t = torch.from_numpy(t).view(adj_matrix.shape[0])
-
-    # print(xt.shape)
-    loss = 0 
+    tprime = torch.from_numpy(tprime).view(adj_matrix.shape[0])
+    tprimeprime = torch.from_numpy(tprimeprime).view(adj_matrix.shape[0])
     
-    #two steps of teacher DDIM
-    for idx in range(t.shape[0]):
-      tprime_elem = np.array([tprime[idx]]).astype(int)
-      tprimeprime_elem = np.array([tprimeprime[idx]]).astype(int)
-      t_elem = np.array([t[idx]]).astype(int)
-      # print(t_elem,tprime_elem,tprimeprime_elem)
-      xprime = self.teacher_gaussian_denoise_step(
-        points, xt, t_elem ,device, edge_index, target_t=tprime_elem
+    #batch forward
+    with torch.no_grad():
+      batched_posterior = torch.vmap(self.teacher_model.gaussian_posterior, in_dims=(0, 0, 0, 0))
+      xprime = self.teacher_model.forward(
+        points.float().to(device),
+        xt.float().to(device),
+        t.float().to(device),
+        None,
       )
+      xprime = xprime.squeeze(1)
+      xprime = batched_posterior(target_t=tprime, t, xprime, xt)
+      xprimeprime = self.teacher_model.forward(
+        points.float().to(device),
+        xprime.float().to(device),
+        tprime.float().to(device),
+        None,
+      )
+      xprimeprime = xprimeprime.squeeze(1)
+      xprimeprime = batched_posterior(target_t=tprimeprime, tprime, xprimeprime, xt)
       
-      xprimeprime = self.teacher_gaussian_denoise_step(
-        points, xprime,tprime_elem, device, edge_index, target_t=tprimeprime_elem
-      ) 
       
       
-      #one step of student DDIM
-      xtheta = self.student_gaussian_denoise_step(
-      points, xt, t_elem, device, edge_index, target_t=tprime_elem
+    # Student Denoise
+    xtheta  = self.forward(
+        points.float().to(device),
+        xprimeprime.float().to(device),
+        tprimeprime.float().to(device),
+        None,
     )
     
-      # print(xprimeprime.shape,xtheta.shape)
-      #compute mse loss
-      loss += F.mse_loss(xprimeprime,xtheta)
-      
-    self.log("train/loss", loss)
+    xtheta = xtheta.squeeze(1)
+    student_batched_posterior = torch.vmap(self.gaussian_posterior, in_dims=(0, 0, 0, 0))
+    xtheta = student_batched_posterior(target_t=tprime, t, xtheta, xt)
+    
+    loss = F.mse_loss(xtheta, xprimeprime)
+    self.lgo("train/loss", loss)
+    
     return loss
     
 
@@ -183,6 +194,7 @@ class TSPModel_distill(COMetaModel):
   def training_step(self, batch, batch_idx):
     if self.diffusion_type == 'gaussian':
       return self.gaussian_distill(batch, batch_idx)
+      # return self.gaussian_training_step(batch, batch_idx)
     elif self.diffusion_type == 'categorical':
       return self.categorical_training_step(batch, batch_idx)
 
@@ -365,3 +377,32 @@ class TSPModel_distill(COMetaModel):
 
   def validation_step(self, batch, batch_idx):
     return self.test_step(batch, batch_idx, split='val')
+  
+  
+  
+  
+    #   with torch.no_grad():
+    #   teacher_pred = self.teacher_model.forward(
+    #     points.float().to(device),
+    #     xt.float().to(device),
+    #     t.float().to(device),
+    #     None,      
+    # )
+    #   teacher_pred = teacher_pred.squeeze(1)
+    #   teacher_pred = self.teacher_model.forward(
+    #     points.float().to(adj_matrix.device),
+    #     teacher_pred.float().to(adj_matrix.device),
+    #     (t-1).float().to(adj_matrix.device),
+    #     None,
+    #   )
+    #   teacher_pred = teacher_pred.squeeze(1)
+
+    # epsilon_pred = self.forward(
+    #     points.float().to(adj_matrix.device),
+    #     xt.float().to(adj_matrix.device),
+    #     t.float().to(adj_matrix.device),
+    #     None,
+    # )
+    # epsilon_pred = epsilon_pred.squeeze(1)
+    
+    #  loss = F.mse_loss(teacher_pred,epsilon_pred)
