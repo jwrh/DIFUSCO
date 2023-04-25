@@ -41,15 +41,9 @@ class TSPModel_distill(COMetaModel):
     )
     
     param_args = self.args
-    #initialize student teacher pair
-    # self.student_model = COMetaModel(param_args=param_args)
+
+    #initialize teacher model
     self.teacher_model = COMetaModel(param_args=param_args)
-
-
-    
-    #initialize parameter at beginning, both same weights
-    # self.student_model.load_from_checkpoint(param_args.ckpt_path)
-    # self.teacher_model.load_from_checkpoint(param_args.ckpt_path)
 
 
 
@@ -119,12 +113,12 @@ class TSPModel_distill(COMetaModel):
     adj_matrix = adj_matrix * (1.0 + 0.05 * torch.rand_like(adj_matrix))
     
     # Sample from diffusion
-    t = np.random.randint(1, self.student_model.diffusion.T + 1,adj_matrix.shape[0])
+    t = np.random.randint(1, self.diffusion.T + 1,adj_matrix.shape[0])
     tprime = t - 1
     tprimeprime = t - 2
     
     
-    xt, epsilon = self.student_model.diffusion.sample(adj_matrix, t)
+    xt, epsilon = self.diffusion.sample(adj_matrix, t)
     
     t = torch.from_numpy(t).view(adj_matrix.shape[0])
 
@@ -213,14 +207,14 @@ class TSPModel_distill(COMetaModel):
   def gaussian_denoise_step(self, points, xt, t, device, edge_index=None, target_t=None):
     with torch.no_grad():
       t = torch.from_numpy(t).view(1)
-      pred = self.student_model.forward(
+      pred = self.forward(
           points.float().to(device),
           xt.float().to(device),
           t.float().to(device),
           edge_index.long().to(device) if edge_index is not None else None,
       )
       pred = pred.squeeze(1)
-      xt = self.student_model.gaussian_posterior(target_t, t, pred, xt)
+      xt = self.gaussian_posterior(target_t, t, pred, xt)
       return xt
     
   def teacher_gaussian_denoise_step(self, points, xt, t, device, edge_index=None, target_t=None):
@@ -243,14 +237,14 @@ class TSPModel_distill(COMetaModel):
       #we don't add torch.no_grad() here because we want to compute the gradients
       t = torch.from_numpy(t).view(1)
       # print("student time",t)
-      pred = self.student_model.forward(
+      pred = self.forward(
           points.float().to(device),
           xt.float().to(device),
           t.float().to(device),
           edge_index.long().to(device) if edge_index is not None else None,
       )
       pred = pred.squeeze(1)
-      xt = self.student_model.gaussian_posterior(target_t, t, pred, xt)
+      xt = self.gaussian_posterior(target_t, t, pred, xt)
       return xt
 
   def test_step(self, batch, batch_idx, split='test'):
@@ -302,7 +296,7 @@ class TSPModel_distill(COMetaModel):
       if self.sparse:
         xt = xt.reshape(-1)
 
-      steps = self.args.inference_diffusion_steps // 2
+      steps = self.args.inference_diffusion_steps // 2 #denoise for half the steps
       time_schedule = InferenceSchedule(inference_schedule=self.args.inference_schedule,
                                         T=self.diffusion.T, inference_T=steps)
 
