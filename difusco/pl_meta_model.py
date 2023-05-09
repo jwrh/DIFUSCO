@@ -158,7 +158,6 @@ class COMetaModel(pl.LightningModule):
       target_t = torch.from_numpy(target_t).view(1)
 
     atbar = diffusion.alphabar[t]
-    print(diffusion.alphabar)
     atbar_target = diffusion.alphabar[target_t]
 
     if self.args.inference_trick is None or t <= 1:

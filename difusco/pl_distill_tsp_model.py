@@ -14,7 +14,7 @@ from pl_meta_distill import COMetaModel
 from pl_tsp_model import TSPModel
 from utils.diffusion_schedulers import InferenceSchedule
 from utils.tsp_utils import TSPEvaluator, batched_two_opt_torch, merge_tours
-from torch import vmap
+from functorch import grad, vmap
 
 #initialize weights of model with weights from model_ema
 
@@ -120,46 +120,48 @@ class TSPModel_distill(COMetaModel):
     
     xt, epsilon = self.diffusion.sample(adj_matrix, t)
     
-    t = torch.from_numpy(t).view(adj_matrix.shape[0])
-    tprime = torch.from_numpy(tprime).view(adj_matrix.shape[0])
-    tprimeprime = torch.from_numpy(tprimeprime).view(adj_matrix.shape[0])
+    t_tensor = torch.from_numpy(t).view(adj_matrix.shape[0])
+    tprime_tensor = torch.from_numpy(tprime).view(adj_matrix.shape[0])
+    tprimeprime_tensor = torch.from_numpy(tprimeprime).view(adj_matrix.shape[0])
     
     #batch forward
     with torch.no_grad():
-      batched_posterior = torch.vmap(self.teacher_model.gaussian_posterior, in_dims=(0, 0, 0, 0))
-      xprime = self.teacher_model.forward(
+      
+      epsilon = self.teacher_model.forward(
         points.float().to(device),
         xt.float().to(device),
-        t.float().to(device),
+        t_tensor.float().to(device),
         None,
       )
-      xprime = xprime.squeeze(1)
-      xprime = batched_posterior(target_t=tprime, t, xprime, xt)
-      xprimeprime = self.teacher_model.forward(
+      epsilon= epsilon.squeeze(1)
+      xprime = self.teacher_model.batched_gaussian_posterior(tprime_tensor, t_tensor, xt,epsilon)
+      
+      
+      epsilon_prime = self.teacher_model.forward(
         points.float().to(device),
         xprime.float().to(device),
-        tprime.float().to(device),
+        tprime_tensor.float().to(device),
         None,
       )
-      xprimeprime = xprimeprime.squeeze(1)
-      xprimeprime = batched_posterior(target_t=tprimeprime, tprime, xprimeprime, xt)
+      epsilon_prime = epsilon_prime.squeeze(1)
+      xprimeprime = self.teacher_model.batched_gaussian_posterior(tprimeprime_tensor, tprime_tensor,xprime, epsilon_prime)
       
       
       
     # Student Denoise
-    xtheta  = self.forward(
+    epsilon_theta  = self.forward(
         points.float().to(device),
-        xprimeprime.float().to(device),
-        tprimeprime.float().to(device),
+        xt.float().to(device),
+        tprime_tensor.float().to(device),
         None,
     )
     
-    xtheta = xtheta.squeeze(1)
-    student_batched_posterior = torch.vmap(self.gaussian_posterior, in_dims=(0, 0, 0, 0))
-    xtheta = student_batched_posterior(target_t=tprime, t, xtheta, xt)
+    epsilon_theta = epsilon_theta.squeeze(1)
+    xtheta = self.batched_gaussian_posterior(tprime_tensor, t_tensor, epsilon_theta, xt)
+
     
     loss = F.mse_loss(xtheta, xprimeprime)
-    self.lgo("train/loss", loss)
+    self.log("train/loss", loss)
     
     return loss
     
@@ -308,7 +310,7 @@ class TSPModel_distill(COMetaModel):
       if self.sparse:
         xt = xt.reshape(-1)
 
-      steps = self.args.inference_diffusion_steps // 2 #denoise for half the steps
+      steps = self.args.inference_diffusion_steps #maintain same steps
       time_schedule = InferenceSchedule(inference_schedule=self.args.inference_schedule,
                                         T=self.diffusion.T, inference_T=steps)
 

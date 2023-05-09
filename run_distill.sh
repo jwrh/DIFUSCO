@@ -26,4 +26,4 @@ python -u difusco/distill_train.py \
   --inference_diffusion_steps 50 \
   --inference_trick "ddim" \
   --ckpt_path "models/tsp_diffusion_graph_gaussian_tsp50/u463siy5/checkpoints/last.ckpt" \
-  --fp16
+  --fp16 

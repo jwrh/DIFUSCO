@@ -17,7 +17,7 @@ class GaussianDiffusion(object):
     if schedule == 'linear':
       b0 = 1e-4
       bT = 2e-2
-      self.beta = np.linspace(b0, bT, T)
+      self.beta = np.linspace(b0, bT, T) #modified to be half of T, for 2x distillation
     elif schedule == 'cosine':
       self.alphabar = self.__cos_noise(np.arange(0, T + 1, 1)) / self.__cos_noise(
           0)  # Generate an extra alpha for bT
