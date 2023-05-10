@@ -9,15 +9,21 @@ import torch
 class GaussianDiffusion(object):
   """Gaussian Diffusion process with linear beta scheduling"""
 
-  def __init__(self, T, schedule):
+  def __init__(self, T, schedule, skip=1):
+    '''
+    argument "skip", teacher skip = 1, student skip = 2. 
+    student_t = 2 * student_t, teacher_t is identity.
+    '''
     # Diffusion steps
     self.T = T
-
+    self.skip = skip
+    
+    
     # Noise schedule
     if schedule == 'linear':
       b0 = 1e-4
       bT = 2e-2
-      self.beta = np.linspace(b0, bT, T) #modified to be half of T, for 2x distillation
+      self.beta = np.linspace(b0, bT, T) 
     elif schedule == 'cosine':
       self.alphabar = self.__cos_noise(np.arange(0, T + 1, 1)) / self.__cos_noise(
           0)  # Generate an extra alpha for bT
@@ -31,8 +37,9 @@ class GaussianDiffusion(object):
     offset = 0.008
     return np.cos(math.pi * 0.5 * (t / self.T + offset) / (1 + offset)) ** 2
 
-  def sample(self, x0, t):
+  def sample(self, x0, t, skip):
     # Select noise scales
+    t = t * skip #scale t for student
     noise_dims = (x0.shape[0],) + tuple((1 for _ in x0.shape[1:]))
     atbar = torch.from_numpy(self.alphabar[t]).view(noise_dims).to(x0.device)
     assert len(atbar.shape) == len(x0.shape), 'Shape mismatch'
@@ -83,9 +90,9 @@ class CategoricalDiffusion(object):
 
 
 class InferenceSchedule(object):
-  def __init__(self, inference_schedule="linear", T=1000, inference_T=1000):
+  def __init__(self, inference_schedule="linear", T=1000, inference_T=1000, skip=1):
     self.inference_schedule = inference_schedule
-    self.T = T
+    self.T = T // skip
     self.inference_T = inference_T
 
   def __call__(self, i):

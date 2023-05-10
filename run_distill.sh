@@ -1,5 +1,5 @@
 export PYTHONPATH="$PWD:$PYTHONPATH"
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9
+export CUDA_VISIBLE_DEVICES=0
 
 # shellcheck disable=SC2155
 export WANDB_RUN_ID=$(python -c "import wandb; print(wandb.util.generate_id())")
@@ -19,11 +19,12 @@ python -u difusco/distill_train.py \
   --training_split "data/data/tsp/tsp50_train_concorde.txt" \
   --validation_split "data/data/tsp/tsp50_valid_concorde.txt" \
   --test_split "data/data/tsp/tsp50_test_concorde.txt" \
-  --batch_size 46 \
+  --batch_size 5 \
   --num_epochs 50 \
+  --diffusion_steps 512 \
   --validation_examples 8 \
   --inference_schedule "cosine" \
   --inference_diffusion_steps 50 \
-  --inference_trick "ddim" \
   --ckpt_path "models/tsp_diffusion_graph_gaussian_tsp50/u463siy5/checkpoints/last.ckpt" \
-  --fp16 
+  --fp16 \
+  --skip 2

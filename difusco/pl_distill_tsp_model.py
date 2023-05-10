@@ -44,6 +44,7 @@ class TSPModel_distill(COMetaModel):
     param_args = self.args
 
     #initialize teacher model
+    param_args.skip = 1 #teacher is does not skip 
     self.teacher_model = COMetaModel(param_args=param_args)
 
 
@@ -113,16 +114,14 @@ class TSPModel_distill(COMetaModel):
     adj_matrix = adj_matrix * (1.0 + 0.05 * torch.rand_like(adj_matrix))
     
     # Sample from diffusion
-    t = np.random.randint(1, self.diffusion.T + 1,adj_matrix.shape[0])
-    tprime = t - 1
-    tprimeprime = t - 2
     
+    effective_T = self.diffusion.T//self.diffusion.skip
+    t = np.random.randint(1, effective_T + 1,adj_matrix.shape[0])
     
-    xt, epsilon = self.diffusion.sample(adj_matrix, t)
+    xt, epsilon = self.diffusion.sample(adj_matrix, t, skip=self.diffusion.skip)
     
     t_tensor = torch.from_numpy(t).view(adj_matrix.shape[0])
-    tprime_tensor = torch.from_numpy(tprime).view(adj_matrix.shape[0])
-    tprimeprime_tensor = torch.from_numpy(tprimeprime).view(adj_matrix.shape[0])
+
     
     #batch forward
     with torch.no_grad():
@@ -130,21 +129,22 @@ class TSPModel_distill(COMetaModel):
       epsilon = self.teacher_model.forward(
         points.float().to(device),
         xt.float().to(device),
-        t_tensor.float().to(device),
+        (2 * t_tensor ).float().to(device),
         None,
-      )
+      ) # teacher timestep doubled 
+
       epsilon= epsilon.squeeze(1)
-      xprime = self.teacher_model.batched_gaussian_posterior(tprime_tensor, t_tensor, xt,epsilon)
+      xprime = self.teacher_model.batched_gaussian_posterior((2 * t_tensor - 1), (2 * t_tensor), xt, epsilon)
       
       
       epsilon_prime = self.teacher_model.forward(
         points.float().to(device),
         xprime.float().to(device),
-        tprime_tensor.float().to(device),
+       (2 * t_tensor - 1).float().to(device),
         None,
       )
       epsilon_prime = epsilon_prime.squeeze(1)
-      xprimeprime = self.teacher_model.batched_gaussian_posterior(tprimeprime_tensor, tprime_tensor,xprime, epsilon_prime)
+      xprimeprime = self.teacher_model.batched_gaussian_posterior((2 * t_tensor - 2), (2 * t_tensor - 1),xprime, epsilon_prime)
       
       
       
@@ -152,17 +152,18 @@ class TSPModel_distill(COMetaModel):
     epsilon_theta  = self.forward(
         points.float().to(device),
         xt.float().to(device),
-        tprime_tensor.float().to(device),
+        t_tensor.float().to(device),
         None,
     )
-    
     epsilon_theta = epsilon_theta.squeeze(1)
-    xtheta = self.batched_gaussian_posterior(tprime_tensor, t_tensor, epsilon_theta, xt)
+    xtheta = self.batched_gaussian_posterior((t_tensor - 1), t_tensor, epsilon_theta, xt)
 
+    #perform truncated SNR loss
+    epsilon_loss = F.mse_loss(epsilon_theta, epsilon_prime)
+    x_loss = F.mse_loss(xtheta, xprimeprime)
+    loss = max(epsilon_loss, x_loss)
     
-    loss = F.mse_loss(xtheta, xprimeprime)
     self.log("train/loss", loss)
-    
     return loss
     
 
@@ -312,7 +313,7 @@ class TSPModel_distill(COMetaModel):
 
       steps = self.args.inference_diffusion_steps #maintain same steps
       time_schedule = InferenceSchedule(inference_schedule=self.args.inference_schedule,
-                                        T=self.diffusion.T, inference_T=steps)
+                                        T=self.diffusion.T, inference_T=steps, skip=2)
 
       # Diffusion iterations
       for i in range(steps):
@@ -383,28 +384,3 @@ class TSPModel_distill(COMetaModel):
   
   
   
-    #   with torch.no_grad():
-    #   teacher_pred = self.teacher_model.forward(
-    #     points.float().to(device),
-    #     xt.float().to(device),
-    #     t.float().to(device),
-    #     None,      
-    # )
-    #   teacher_pred = teacher_pred.squeeze(1)
-    #   teacher_pred = self.teacher_model.forward(
-    #     points.float().to(adj_matrix.device),
-    #     teacher_pred.float().to(adj_matrix.device),
-    #     (t-1).float().to(adj_matrix.device),
-    #     None,
-    #   )
-    #   teacher_pred = teacher_pred.squeeze(1)
-
-    # epsilon_pred = self.forward(
-    #     points.float().to(adj_matrix.device),
-    #     xt.float().to(adj_matrix.device),
-    #     t.float().to(adj_matrix.device),
-    #     None,
-    # )
-    # epsilon_pred = epsilon_pred.squeeze(1)
-    
-    #  loss = F.mse_loss(teacher_pred,epsilon_pred)

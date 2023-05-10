@@ -62,6 +62,7 @@ def arg_parser():
   parser.add_argument('--do_train', action='store_true')
   parser.add_argument('--do_test', action='store_true')
   parser.add_argument('--do_valid_only', action='store_true')
+  parser.add_argument('--skip', type=int, default=2)
 
   args = parser.parse_args()
   return args
