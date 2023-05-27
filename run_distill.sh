@@ -1,5 +1,5 @@
 export PYTHONPATH="$PWD:$PYTHONPATH"
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=1
 
 # shellcheck disable=SC2155
 export WANDB_RUN_ID=$(python -c "import wandb; print(wandb.util.generate_id())")
@@ -7,11 +7,10 @@ echo "WANDB_ID is $WANDB_RUN_ID"
 
 python -u difusco/distill_train.py \
   --task "tsp_distill" \
-  --wandb_logger_name "tsp_diffusion_graph_gaussian_tsp50_distill" \
+  --wandb_logger_name "tsp50_baseline_third" \
   --diffusion_type "gaussian" \
-  --do_train \
   --do_test \
-  --learning_rate 0.0002 \
+  --learning_rate 0.0001 \
   --weight_decay 0.0001 \
   --storage_path "" \
   --lr_scheduler "cosine-decay" \
@@ -19,12 +18,12 @@ python -u difusco/distill_train.py \
   --training_split "data/data/tsp/tsp50_train_concorde.txt" \
   --validation_split "data/data/tsp/tsp50_valid_concorde.txt" \
   --test_split "data/data/tsp/tsp50_test_concorde.txt" \
-  --batch_size 5 \
+  --batch_size 50 \
   --num_epochs 50 \
-  --diffusion_steps 512 \
+  --diffusion_steps 1024 \
   --validation_examples 8 \
   --inference_schedule "cosine" \
   --inference_diffusion_steps 50 \
-  --ckpt_path "models/tsp_diffusion_graph_gaussian_tsp50/u463siy5/checkpoints/last.ckpt" \
+  --skip 8 \
   --fp16 \
-  --skip 2
+  --ckpt_path "/usr0/home/junweih/DIFUSCO/models/tsp50_baseline_third/kyxhto4j/checkpoints/last.ckpt" 

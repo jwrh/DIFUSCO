@@ -37,7 +37,7 @@ class GaussianDiffusion(object):
     offset = 0.008
     return np.cos(math.pi * 0.5 * (t / self.T + offset) / (1 + offset)) ** 2
 
-  def sample(self, x0, t, skip):
+  def sample(self, x0, t, skip=1):
     # Select noise scales
     t = t * skip #scale t for student
     noise_dims = (x0.shape[0],) + tuple((1 for _ in x0.shape[1:]))
@@ -92,7 +92,7 @@ class CategoricalDiffusion(object):
 class InferenceSchedule(object):
   def __init__(self, inference_schedule="linear", T=1000, inference_T=1000, skip=1):
     self.inference_schedule = inference_schedule
-    self.T = T // skip
+    self.T = T // skip 
     self.inference_T = inference_T
 
   def __call__(self, i):

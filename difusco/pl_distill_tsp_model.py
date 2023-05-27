@@ -8,7 +8,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.data
 from pytorch_lightning.utilities import rank_zero_info
-
+import networkx as nx
+import matplotlib.pyplot as plt
 from co_datasets.tsp_graph_dataset import TSPGraphDataset
 from pl_meta_distill import COMetaModel
 from pl_tsp_model import TSPModel
@@ -166,7 +167,6 @@ class TSPModel_distill(COMetaModel):
     self.log("train/loss", loss)
     return loss
     
-
   def gaussian_training_step(self, batch, batch_idx):
     if self.sparse:
       # TODO: Implement Gaussian diffusion with sparse graphs
@@ -250,18 +250,33 @@ class TSPModel_distill(COMetaModel):
   
   def student_gaussian_denoise_step(self, points, xt, t, device, edge_index=None, target_t=None):
       #we don't add torch.no_grad() here because we want to compute the gradients
-      t = torch.from_numpy(t).view(1)
-      # print("student time",t)
-      pred = self.forward(
-          points.float().to(device),
-          xt.float().to(device),
-          t.float().to(device),
-          edge_index.long().to(device) if edge_index is not None else None,
-      )
-      pred = pred.squeeze(1)
-      xt = self.gaussian_posterior(target_t, t, pred, xt)
-      return xt
+      with torch.no_grad():
+        t = torch.from_numpy(t).view(1)
+        # print("student time",t)
+        pred = self.forward(
+            points.float().to(device),
+            xt.float().to(device),
+            t.float().to(device),
+            edge_index.long().to(device) if edge_index is not None else None,
+        )
+        pred = pred.squeeze(1)
+        xt = self.gaussian_posterior(target_t, t, pred, xt)
+        return xt
+  def tour_to_adjacency_matrix(tour):
+      num_nodes = len(tour)
+      adjacency_matrix = np.zeros((num_nodes, num_nodes), dtype=int)
 
+      for i in range(num_nodes - 1):
+          current_node = tour[i]
+          next_node = tour[i + 1]
+          adjacency_matrix[current_node][next_node] = 1
+          adjacency_matrix[next_node][current_node] = 1
+
+      # Connect the last and first nodes to complete the tour
+      adjacency_matrix[tour[-1]][tour[0]] = 1
+      adjacency_matrix[tour[0]][tour[-1]] = 1
+
+      return adjacency_matrix
   def test_step(self, batch, batch_idx, split='test'):
     edge_index = None
     np_edge_index = None
@@ -287,12 +302,12 @@ class TSPModel_distill(COMetaModel):
     stacked_tours = []
     ns, merge_iterations = 0, 0
 
-    if self.args.parallel_sampling > 1:
-      if not self.sparse:
-        points = points.repeat(self.args.parallel_sampling, 1, 1)
-      else:
-        points = points.repeat(self.args.parallel_sampling, 1)
-        edge_index = self.duplicate_edge_index(edge_index, np_points.shape[0], device)
+    # if self.args.parallel_sampling > 1:
+    #   if not self.sparse:
+    #     points = points.repeat(self.args.parallel_sampling, 1, 1)
+    #   else:
+    points = points.repeat(self.args.parallel_sampling, 1)
+    edge_index = self.duplicate_edge_index(edge_index, np_points.shape[0], device)
 
     for _ in range(self.args.sequential_sampling):
       xt = torch.randn_like(adj_matrix.float())
@@ -313,9 +328,10 @@ class TSPModel_distill(COMetaModel):
 
       steps = self.args.inference_diffusion_steps #maintain same steps
       time_schedule = InferenceSchedule(inference_schedule=self.args.inference_schedule,
-                                        T=self.diffusion.T, inference_T=steps, skip=2)
+                                        T=self.diffusion.T, inference_T=steps, skip=self.args.skip)
 
       # Diffusion iterations
+      chunk = steps//5
       for i in range(steps):
         t1, t2 = time_schedule(i)
         t1 = np.array([t1]).astype(int)
@@ -327,12 +343,35 @@ class TSPModel_distill(COMetaModel):
         else:
           xt = self.categorical_denoise_step(
               points, xt, t1, device, edge_index, target_t=t2)
+        
+        if i % chunk == 0:
+          adj_mat = (xt.cpu().detach().numpy()* 0.5 + 0.5)[0]
+
+          # Create a NetworkX graph from the modified adjacency matrix
+          tours, merge_iterations = merge_tours(
+              adj_mat, np_points, np_edge_index,
+              sparse_graph=self.sparse,
+              parallel_sampling=self.args.parallel_sampling,
+          )
+          adjacency_matrix = self.tour_to_adjacency_matrix(tours[0])
+          graph = nx.from_numpy_matrix(adjacency_matrix)
+
+          # Assert the graph has 50 nodes
+          assert len(graph.nodes) == 50, "The graph should have exactly 50 nodes."
+
+          # Draw the graph using matplotlib
+          pos = nx.spring_layout(graph)  # Positions of nodes for layout
+          nx.draw(graph, pos, with_labels=False, node_color='blue', node_size=15, edge_color='red')
+          plt.savefig(f'student{i}.png')
+          plt.close()
 
       if self.diffusion_type == 'gaussian':
         adj_mat = xt.cpu().detach().numpy() * 0.5 + 0.5
       else:
         adj_mat = xt.float().cpu().detach().numpy() + 1e-6
 
+      assert(0 == 1)
+      
       if self.args.save_numpy_heatmap:
         self.run_save_numpy_heatmap(adj_mat, np_points, real_batch_idx, split)
 
@@ -341,6 +380,7 @@ class TSPModel_distill(COMetaModel):
           sparse_graph=self.sparse,
           parallel_sampling=self.args.parallel_sampling,
       )
+      
 
       # Refine using 2-opt
       solved_tours, ns = batched_two_opt_torch(
@@ -382,5 +422,4 @@ class TSPModel_distill(COMetaModel):
     return self.test_step(batch, batch_idx, split='val')
   
   
-  
-  
+

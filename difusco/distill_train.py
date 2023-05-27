@@ -11,7 +11,7 @@ from pytorch_lightning.callbacks.progress import TQDMProgressBar
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.strategies.ddp import DDPStrategy
 from pytorch_lightning.utilities import rank_zero_info
-
+import gc
 from pl_distill_tsp_model import TSPModel_distill
 
 
@@ -62,7 +62,7 @@ def arg_parser():
   parser.add_argument('--do_train', action='store_true')
   parser.add_argument('--do_test', action='store_true')
   parser.add_argument('--do_valid_only', action='store_true')
-  parser.add_argument('--skip', type=int, default=2)
+  parser.add_argument('--skip', type=int, default=1000)
 
   args = parser.parse_args()
   return args
@@ -122,22 +122,35 @@ def main(args):
   if args.do_train:
     if args.resume_weight_only:
       #there is no model to resume, so we need to load the weights manually
+      print(args)
+      pretrained_memory = torch.cuda.memory_allocated() 
+      model = model_class.load_from_checkpoint(ckpt_path,param_args=args)
+      #generate a lot of signs here
+      print(">>>>>>>>>>>>>>>>>>>>>>")
+      print(">>>>>>>>>>>>>>>>>>>>>>")
+      print(">>>>>>>>>>>>>>>>>>>>>>")
+      print(">>>>>>>>>>>>>>>>>>>>>>")
+      print(">>>>>>>>>>>>>>>>>>>>>>")
+      memory_after_loading = torch.cuda.memory_allocated()
+      gc.collect()
+      torch.cuda.empty_cache()
+      print("Memory before loading weights:", pretrained_memory)
+      print("Memory after loading weights:", memory_after_loading)
+      print("Memory difference:", memory_after_loading - pretrained_memory)
       trainer.fit(model)
     else:
-      trainer.fit(model)
+      trainer.fit(model, ckpt_path=ckpt_path)
 
     if args.do_test:
       trainer.test(ckpt_path=checkpoint_callback.best_model_path)
 
   elif args.do_test:
-    trainer.validate(model.student_model, ckpt_path=ckpt_path)
+    # trainer.validate(model,ckpt_path=ckpt_path)
     if not args.do_valid_only:
-      trainer.test(model.student_model, ckpt_path=ckpt_path)
+      trainer.test(model,ckpt_path=ckpt_path)
       
   trainer.logger.finalize("success")
-
 
 if __name__ == '__main__':
   args = arg_parser()
   main(args)
-
