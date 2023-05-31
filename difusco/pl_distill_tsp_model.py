@@ -7,21 +7,16 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.data
+import copy 
+from copy import deepcopy
 from pytorch_lightning.utilities import rank_zero_info
-import networkx as nx
-import matplotlib.pyplot as plt
+
 from co_datasets.tsp_graph_dataset import TSPGraphDataset
-from pl_meta_distill import COMetaModel
-from pl_tsp_model import TSPModel
+from pl_meta_distill import COMetaModel, COMetaModel_teacher
 from utils.diffusion_schedulers import InferenceSchedule
 from utils.tsp_utils import TSPEvaluator, batched_two_opt_torch, merge_tours
-from functorch import grad, vmap
-
-#initialize weights of model with weights from model_ema
 
 
-
-                               
 class TSPModel_distill(COMetaModel):
   def __init__(self,
                param_args=None):
@@ -42,17 +37,73 @@ class TSPModel_distill(COMetaModel):
         sparse_factor=self.args.sparse_factor,
     )
     
-    param_args = self.args
-
+    self.who_eval = self.args.who_eval
+    self.skip = self.args.skip
+    param_args = copy.deepcopy(self.args)
     #initialize teacher model
     param_args.skip = 1 #teacher is does not skip 
-    self.teacher_model = COMetaModel(param_args=param_args)
-
-
+    self.teacher_model = COMetaModel_teacher(param_args=param_args)
 
   def forward(self, x, adj, t, edge_index):
     return self.model(x, t, adj, edge_index)
+  def gaussian_distill(self, batch, batch_idx):
+    if self.sparse:
+      # TODO: Implement Gaussian diffusion with sparse graphs
+      raise ValueError("DIFUSCO with sparse graphs are not supported for Gaussian diffusion")
+    _, points, adj_matrix, _ = batch
 
+    adj_matrix = adj_matrix * 2 - 1
+    adj_matrix = adj_matrix * (1.0 + 0.05 * torch.rand_like(adj_matrix))
+    device = adj_matrix.device
+    # Sample from diffusion
+    effective_T = self.diffusion.T // self.skip
+    t = np.random.randint(1, effective_T + 1, adj_matrix.shape[0]).astype(int)
+    xt, epsilon = self.diffusion.sample(adj_matrix, t, skip=self.skip)
+    t_tensor = torch.from_numpy(t).float().view(adj_matrix.shape[0])
+    xt_clone =  xt.clone()
+    #two steps of teacher
+    with torch.no_grad(): 
+      epsilon = self.teacher_model.forward(
+        points.float().to(device),
+        xt.float().to(device),
+        (2 * t_tensor ).float().to(device),
+        None,
+      ) # teacher timestep doubled 
+
+      epsilon= epsilon.squeeze(1)
+      xprime = self.teacher_model.batched_gaussian_posterior((2 * t- 1), (2 * t), epsilon, xt)
+      
+      
+      epsilon_prime = self.teacher_model.forward(
+        points.float().to(device),
+        xprime.float().to(device),
+       (2 * t_tensor - 1).float().to(device),
+        None,
+      )
+      
+      epsilon_prime = epsilon_prime.squeeze(1)
+      xprimeprime = self.teacher_model.batched_gaussian_posterior((2 * t - 2), (2 * t- 1), epsilon_prime, xprime)
+    
+    #one step of student
+    epsilon_theta = self.forward(
+        points.float().to(device),
+        xt_clone.float().to(device),
+        t_tensor.float().to(device),
+        None,
+    )
+    epsilon_theta = epsilon_theta.squeeze(1)
+    xtheta = self.batched_gaussian_posterior((t - 1), t, epsilon_theta, xt)
+
+    #truncated SNR 
+    # alpha_t = self.diffusion.alpha[t]
+    # alpha_t = torch.from_numpy(alpha_t).float().to(device)
+    # SNR = torch.square(alpha_t) / (1 - torch.square(alpha_t))
+    # x_l2 = F.mse_loss(xtheta,xprimeprime, reduction="none")
+    # loss = torch.mean(torch.maximum(torch.ones_like(SNR), SNR) * x_l2)
+    loss = F.mse_loss(xtheta,xprimeprime)
+    self.log("train/loss", loss)
+    return loss     
+  
   def categorical_training_step(self, batch, batch_idx):
     edge_index = None
     if not self.sparse:
@@ -76,7 +127,7 @@ class TSPModel_distill(COMetaModel):
     xt = self.diffusion.sample(adj_matrix_onehot, t)
     xt = xt * 2 - 1
     xt = xt * (1.0 + 0.05 * torch.rand_like(xt))
-    
+
     if self.sparse:
       t = torch.from_numpy(t).float()
       t = t.reshape(-1, 1).repeat(1, adj_matrix.shape[1]).reshape(-1)
@@ -101,72 +152,6 @@ class TSPModel_distill(COMetaModel):
     self.log("train/loss", loss)
     return loss
 
-  def gaussian_distill(self,batch,batch_idx):
-    #get batch data
-    device = batch[-1].device
-    edge_index = None
-    
-    if self.sparse:
-      # TODO: Implement Gaussian diffusion with sparse graphs
-      raise ValueError("DIFUSCO with sparse graphs are not supported for Gaussian diffusion")
-    _, points, adj_matrix, _ = batch
-
-    adj_matrix = adj_matrix * 2 - 1
-    adj_matrix = adj_matrix * (1.0 + 0.05 * torch.rand_like(adj_matrix))
-    
-    # Sample from diffusion
-    
-    effective_T = self.diffusion.T//self.diffusion.skip
-    t = np.random.randint(1, effective_T + 1,adj_matrix.shape[0])
-    
-    xt, epsilon = self.diffusion.sample(adj_matrix, t, skip=self.diffusion.skip)
-    
-    t_tensor = torch.from_numpy(t).view(adj_matrix.shape[0])
-
-    
-    #batch forward
-    with torch.no_grad():
-      
-      epsilon = self.teacher_model.forward(
-        points.float().to(device),
-        xt.float().to(device),
-        (2 * t_tensor ).float().to(device),
-        None,
-      ) # teacher timestep doubled 
-
-      epsilon= epsilon.squeeze(1)
-      xprime = self.teacher_model.batched_gaussian_posterior((2 * t_tensor - 1), (2 * t_tensor), xt, epsilon)
-      
-      
-      epsilon_prime = self.teacher_model.forward(
-        points.float().to(device),
-        xprime.float().to(device),
-       (2 * t_tensor - 1).float().to(device),
-        None,
-      )
-      epsilon_prime = epsilon_prime.squeeze(1)
-      xprimeprime = self.teacher_model.batched_gaussian_posterior((2 * t_tensor - 2), (2 * t_tensor - 1),xprime, epsilon_prime)
-      
-      
-      
-    # Student Denoise
-    epsilon_theta  = self.forward(
-        points.float().to(device),
-        xt.float().to(device),
-        t_tensor.float().to(device),
-        None,
-    )
-    epsilon_theta = epsilon_theta.squeeze(1)
-    xtheta = self.batched_gaussian_posterior((t_tensor - 1), t_tensor, epsilon_theta, xt)
-
-    #perform truncated SNR loss
-    epsilon_loss = F.mse_loss(epsilon_theta, epsilon_prime)
-    x_loss = F.mse_loss(xtheta, xprimeprime)
-    loss = max(epsilon_loss, x_loss)
-    
-    self.log("train/loss", loss)
-    return loss
-    
   def gaussian_training_step(self, batch, batch_idx):
     if self.sparse:
       # TODO: Implement Gaussian diffusion with sparse graphs
@@ -179,7 +164,7 @@ class TSPModel_distill(COMetaModel):
     t = np.random.randint(1, self.diffusion.T + 1, adj_matrix.shape[0]).astype(int)
     xt, epsilon = self.diffusion.sample(adj_matrix, t)
 
-    t = torch.from_numpy(t).float().view(adj_matrix.shape[0]) # 32 x 1 
+    t = torch.from_numpy(t).float().view(adj_matrix.shape[0])
     # Denoise
     epsilon_pred = self.forward(
         points.float().to(adj_matrix.device),
@@ -197,7 +182,6 @@ class TSPModel_distill(COMetaModel):
   def training_step(self, batch, batch_idx):
     if self.diffusion_type == 'gaussian':
       return self.gaussian_distill(batch, batch_idx)
-      # return self.gaussian_training_step(batch, batch_idx)
     elif self.diffusion_type == 'categorical':
       return self.categorical_training_step(batch, batch_idx)
 
@@ -231,11 +215,9 @@ class TSPModel_distill(COMetaModel):
       pred = pred.squeeze(1)
       xt = self.gaussian_posterior(target_t, t, pred, xt)
       return xt
-    
   def teacher_gaussian_denoise_step(self, points, xt, t, device, edge_index=None, target_t=None):
     with torch.no_grad():
       t = torch.from_numpy(t).view(1)
-      # print("teacher time",t)
       pred = self.teacher_model.forward(
           points.float().to(device),
           xt.float().to(device),
@@ -243,41 +225,27 @@ class TSPModel_distill(COMetaModel):
           edge_index.long().to(device) if edge_index is not None else None,
       )
       pred = pred.squeeze(1)
-
       xt = self.teacher_model.gaussian_posterior(target_t, t, pred, xt)
-
       return xt
-  
-  def student_gaussian_denoise_step(self, points, xt, t, device, edge_index=None, target_t=None):
-      #we don't add torch.no_grad() here because we want to compute the gradients
-      with torch.no_grad():
-        t = torch.from_numpy(t).view(1)
-        # print("student time",t)
-        pred = self.forward(
-            points.float().to(device),
-            xt.float().to(device),
-            t.float().to(device),
-            edge_index.long().to(device) if edge_index is not None else None,
-        )
-        pred = pred.squeeze(1)
-        xt = self.gaussian_posterior(target_t, t, pred, xt)
-        return xt
-  def tour_to_adjacency_matrix(tour):
-      num_nodes = len(tour)
-      adjacency_matrix = np.zeros((num_nodes, num_nodes), dtype=int)
 
-      for i in range(num_nodes - 1):
-          current_node = tour[i]
-          next_node = tour[i + 1]
-          adjacency_matrix[current_node][next_node] = 1
-          adjacency_matrix[next_node][current_node] = 1
-
-      # Connect the last and first nodes to complete the tour
-      adjacency_matrix[tour[-1]][tour[0]] = 1
-      adjacency_matrix[tour[0]][tour[-1]] = 1
-
-      return adjacency_matrix
   def test_step(self, batch, batch_idx, split='test'):
+        if self.who_eval == 'student':
+            return self.student_test_step(batch, batch_idx, split)
+        elif self.who_eval == 'teacher':
+            return self.teacher_test_step(batch, batch_idx, split)
+        else:
+            assert(False)
+            
+  def validation_step(self, batch, batch_idx, split='val'):
+      if self.who_eval == 'student':
+          return self.student_validation_step(batch, batch_idx, split)
+      elif self.who_eval == 'teacher':
+          return self.teacher_validation_step(batch, batch_idx, split)
+      else:
+          assert(False)
+
+
+  def student_test_step(self, batch, batch_idx, split='test'):
     edge_index = None
     np_edge_index = None
     device = batch[-1].device
@@ -302,12 +270,12 @@ class TSPModel_distill(COMetaModel):
     stacked_tours = []
     ns, merge_iterations = 0, 0
 
-    # if self.args.parallel_sampling > 1:
-    #   if not self.sparse:
-    #     points = points.repeat(self.args.parallel_sampling, 1, 1)
-    #   else:
-    points = points.repeat(self.args.parallel_sampling, 1)
-    edge_index = self.duplicate_edge_index(edge_index, np_points.shape[0], device)
+    if self.args.parallel_sampling > 1:
+      if not self.sparse:
+        points = points.repeat(self.args.parallel_sampling, 1, 1)
+      else:
+        points = points.repeat(self.args.parallel_sampling, 1)
+        edge_index = self.duplicate_edge_index(edge_index, np_points.shape[0], device)
 
     for _ in range(self.args.sequential_sampling):
       xt = torch.randn_like(adj_matrix.float())
@@ -326,16 +294,16 @@ class TSPModel_distill(COMetaModel):
       if self.sparse:
         xt = xt.reshape(-1)
 
-      steps = self.args.inference_diffusion_steps #maintain same steps
+      steps = self.args.inference_diffusion_steps
       time_schedule = InferenceSchedule(inference_schedule=self.args.inference_schedule,
-                                        T=self.diffusion.T, inference_T=steps, skip=self.args.skip)
+                                        T=self.diffusion.T, inference_T=steps,skip=self.args.skip)
 
       # Diffusion iterations
-      chunk = steps//5
       for i in range(steps):
         t1, t2 = time_schedule(i)
         t1 = np.array([t1]).astype(int)
         t2 = np.array([t2]).astype(int)
+        print(t1, t2)
 
         if self.diffusion_type == 'gaussian':
           xt = self.gaussian_denoise_step(
@@ -343,35 +311,12 @@ class TSPModel_distill(COMetaModel):
         else:
           xt = self.categorical_denoise_step(
               points, xt, t1, device, edge_index, target_t=t2)
-        
-        if i % chunk == 0:
-          adj_mat = (xt.cpu().detach().numpy()* 0.5 + 0.5)[0]
-
-          # Create a NetworkX graph from the modified adjacency matrix
-          tours, merge_iterations = merge_tours(
-              adj_mat, np_points, np_edge_index,
-              sparse_graph=self.sparse,
-              parallel_sampling=self.args.parallel_sampling,
-          )
-          adjacency_matrix = self.tour_to_adjacency_matrix(tours[0])
-          graph = nx.from_numpy_matrix(adjacency_matrix)
-
-          # Assert the graph has 50 nodes
-          assert len(graph.nodes) == 50, "The graph should have exactly 50 nodes."
-
-          # Draw the graph using matplotlib
-          pos = nx.spring_layout(graph)  # Positions of nodes for layout
-          nx.draw(graph, pos, with_labels=False, node_color='blue', node_size=15, edge_color='red')
-          plt.savefig(f'student{i}.png')
-          plt.close()
 
       if self.diffusion_type == 'gaussian':
         adj_mat = xt.cpu().detach().numpy() * 0.5 + 0.5
       else:
         adj_mat = xt.float().cpu().detach().numpy() + 1e-6
 
-      assert(0 == 1)
-      
       if self.args.save_numpy_heatmap:
         self.run_save_numpy_heatmap(adj_mat, np_points, real_batch_idx, split)
 
@@ -380,7 +325,6 @@ class TSPModel_distill(COMetaModel):
           sparse_graph=self.sparse,
           parallel_sampling=self.args.parallel_sampling,
       )
-      
 
       # Refine using 2-opt
       solved_tours, ns = batched_two_opt_torch(
@@ -407,6 +351,117 @@ class TSPModel_distill(COMetaModel):
     self.log(f"{split}/solved_cost", best_solved_cost, prog_bar=True, on_epoch=True, sync_dist=True)
     return metrics
 
+  def student_validation_step(self, batch, batch_idx, split='val'):
+    return self.student_test_step(batch, batch_idx, split='val')
+
+  def teacher_test_step(self, batch, batch_idx, split='test'):
+    edge_index = None
+    np_edge_index = None
+    device = batch[-1].device
+    if not self.sparse:
+      real_batch_idx, points, adj_matrix, gt_tour = batch
+      np_points = points.cpu().numpy()[0]
+      np_gt_tour = gt_tour.cpu().numpy()[0]
+    else:
+      real_batch_idx, graph_data, point_indicator, edge_indicator, gt_tour = batch
+      route_edge_flags = graph_data.edge_attr
+      points = graph_data.x
+      edge_index = graph_data.edge_index
+      num_edges = edge_index.shape[1]
+      batch_size = point_indicator.shape[0]
+      adj_matrix = route_edge_flags.reshape((batch_size, num_edges // batch_size))
+      points = points.reshape((-1, 2))
+      edge_index = edge_index.reshape((2, -1))
+      np_points = points.cpu().numpy()
+      np_gt_tour = gt_tour.cpu().numpy().reshape(-1)
+      np_edge_index = edge_index.cpu().numpy()
+
+    stacked_tours = []
+    ns, merge_iterations = 0, 0
+
+    if self.args.parallel_sampling > 1:
+      if not self.sparse:
+        points = points.repeat(self.args.parallel_sampling, 1, 1)
+      else:
+        points = points.repeat(self.args.parallel_sampling, 1)
+        edge_index = self.duplicate_edge_index(edge_index, np_points.shape[0], device)
+
+    for _ in range(self.args.sequential_sampling):
+      xt = torch.randn_like(adj_matrix.float())
+      if self.args.parallel_sampling > 1:
+        if not self.sparse:
+          xt = xt.repeat(self.args.parallel_sampling, 1, 1)
+        else:
+          xt = xt.repeat(self.args.parallel_sampling, 1)
+        xt = torch.randn_like(xt)
+
+      if self.diffusion_type == 'gaussian':
+        xt.requires_grad = True
+      else:
+        xt = (xt > 0).long()
+
+      if self.sparse:
+        xt = xt.reshape(-1)
+
+      steps = self.args.inference_diffusion_steps
+      time_schedule = InferenceSchedule(inference_schedule=self.args.inference_schedule,
+                                        T=self.diffusion.T, inference_T=steps,skip=1)
+
+      # Diffusion iterations
+      for i in range(steps):
+        t1, t2 = time_schedule(i)
+        t1 = np.array([t1]).astype(int)
+        t2 = np.array([t2]).astype(int)
+        print("t1", t1, "t2", t2) 
+        if self.diffusion_type == 'gaussian':
+          xt = self.teacher_gaussian_denoise_step(
+              points, xt, t1, device, edge_index, target_t=t2)
+        else:
+          xt = self.teacher_categorical_denoise_step(
+              points, xt, t1, device, edge_index, target_t=t2)
+
+      if self.diffusion_type == 'gaussian':
+        adj_mat = xt.cpu().detach().numpy() * 0.5 + 0.5
+      else:
+        adj_mat = xt.float().cpu().detach().numpy() + 1e-6
+
+      if self.args.save_numpy_heatmap:
+        self.run_save_numpy_heatmap(adj_mat, np_points, real_batch_idx, split)
+
+      tours, merge_iterations = merge_tours(
+          adj_mat, np_points, np_edge_index,
+          sparse_graph=self.sparse,
+          parallel_sampling=self.args.parallel_sampling,
+      )
+
+      # Refine using 2-opt
+      solved_tours, ns = batched_two_opt_torch(
+          np_points.astype("float64"), np.array(tours).astype('int64'),
+          max_iterations=self.args.two_opt_iterations, device=device)
+      stacked_tours.append(solved_tours)
+
+    solved_tours = np.concatenate(stacked_tours, axis=0)
+
+    tsp_solver = TSPEvaluator(np_points)
+    gt_cost = tsp_solver.evaluate(np_gt_tour)
+
+    total_sampling = self.args.parallel_sampling * self.args.sequential_sampling
+    all_solved_costs = [tsp_solver.evaluate(solved_tours[i]) for i in range(total_sampling)]
+    best_solved_cost = np.min(all_solved_costs)
+
+    metrics = {
+        f"{split}/gt_cost": gt_cost,
+        f"{split}/2opt_iterations": ns,
+        f"{split}/merge_iterations": merge_iterations,
+    }
+    for k, v in metrics.items():
+      self.log(k, v, on_epoch=True, sync_dist=True)
+    self.log(f"{split}/solved_cost", best_solved_cost, prog_bar=True, on_epoch=True, sync_dist=True)
+    return metrics
+
+  def teacher_validation_step(self, batch, batch_idx,split='val'):
+    return self.teacher_test_step(batch, batch_idx, split='val')
+  
   def run_save_numpy_heatmap(self, adj_mat, np_points, real_batch_idx, split):
     if self.args.parallel_sampling > 1 or self.args.sequential_sampling > 1:
       raise NotImplementedError("Save numpy heatmap only support single sampling")
@@ -417,9 +472,3 @@ class TSPModel_distill(COMetaModel):
     real_batch_idx = real_batch_idx.cpu().numpy().reshape(-1)[0]
     np.save(os.path.join(heatmap_path, f"{split}-heatmap-{real_batch_idx}.npy"), adj_mat)
     np.save(os.path.join(heatmap_path, f"{split}-points-{real_batch_idx}.npy"), np_points)
-
-  def validation_step(self, batch, batch_idx):
-    return self.test_step(batch, batch_idx, split='val')
-  
-  
-

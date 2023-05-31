@@ -63,7 +63,8 @@ def arg_parser():
   parser.add_argument('--do_test', action='store_true')
   parser.add_argument('--do_valid_only', action='store_true')
   parser.add_argument('--skip', type=int, default=1000)
-
+  parser.add_argument('--who_eval', type=str, default='student')
+  
   args = parser.parse_args()
   return args
 
@@ -145,7 +146,7 @@ def main(args):
       trainer.test(ckpt_path=checkpoint_callback.best_model_path)
 
   elif args.do_test:
-    # trainer.validate(model,ckpt_path=ckpt_path)
+    trainer.validate(model,ckpt_path=ckpt_path)
     if not args.do_valid_only:
       trainer.test(model,ckpt_path=ckpt_path)
       
